@@ -10,9 +10,10 @@ synchronously to the agents library's own ``Trace`` / ``AgentSpan`` /
 into ``invoke_workflow`` / ``invoke_agent`` / ``execute_tool`` spans via
 ``opentelemetry-util-genai``.
 
-LLM-level spans (``chat`` / ``embeddings``) are produced
+For regular agent runs, LLM-level spans (``chat`` / ``embeddings``) are produced
 by ``opentelemetry-instrumentation-genai-openai`` when both packages are
-installed; this instrumentation does not emit them.
+installed. Realtime sessions use the Agents SDK's own WebSocket transport;
+this package instruments their sessions, responses, and tool calls.
 
 Usage
 -----
@@ -54,6 +55,7 @@ from opentelemetry.util.genai.handler import TelemetryHandler
 
 from .package import _instruments
 from .processor import GenAITracingProcessor
+from .realtime import RealtimeInstrumentation
 
 __all__ = ["OpenAIAgentsInstrumentor"]
 
@@ -81,6 +83,7 @@ class OpenAIAgentsInstrumentor(BaseInstrumentor):
     # instance, so state needed for uninstrumentation lives on the class.
     _processor: GenAITracingProcessor | None = None
     _previous_processors: tuple[Any, ...] | None = None
+    _realtime: RealtimeInstrumentation | None = None
 
     def __init__(self) -> None:
         super().__init__()
@@ -118,9 +121,16 @@ class OpenAIAgentsInstrumentor(BaseInstrumentor):
         else:
             add_trace_processor(self._processor)
 
+        self._realtime = RealtimeInstrumentation(handler)
+        self._realtime.instrument()
+
     def _uninstrument(self, **kwargs: Any) -> None:
         if self._processor is None:
             return
+
+        if self._realtime is not None:
+            self._realtime.uninstrument()
+            self._realtime = None
 
         if self._previous_processors is not None:
             set_trace_processors(list(self._previous_processors))
