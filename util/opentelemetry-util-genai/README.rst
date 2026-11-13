@@ -24,6 +24,24 @@ See the module docstring in ``opentelemetry.util.genai.handler`` for usage examp
 including context manager and manual lifecycle patterns.
 
 
+Realtime Sessions
+-----------------
+
+Use ``TelemetryHandler.realtime_inference()`` for each provider-defined
+generation in a realtime connection. Pass ``realtime_session_id`` to correlate
+generations independently of ``conversation_id``. Finalize each invocation
+when its generation ends, not when the connection closes.
+
+Emit ``emit_realtime_session_started()`` once after connection establishment
+and ``emit_realtime_session_ended()`` once on closure. These INFO events are
+independent of content capture. Pass an error to the ended event only when
+it terminated the session; this sets ``error.type`` and WARN severity.
+
+Realtime invocations record GenAI client metrics without session IDs as metric
+labels. They do not emit ``gen_ai.client.inference.operation.details`` events.
+See the `realtime semantic conventions <https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/gen-ai-realtime.md>`_.
+
+
 Context Management and Propagation
 ----------------------------------
 

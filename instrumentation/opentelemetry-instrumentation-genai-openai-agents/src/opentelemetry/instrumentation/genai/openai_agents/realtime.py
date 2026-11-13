@@ -7,6 +7,7 @@ from collections.abc import Callable
 from contextvars import ContextVar
 from importlib import import_module
 from typing import Any, cast
+from urllib.parse import urlparse
 from weakref import ReferenceType, WeakKeyDictionary, ref
 
 from wrapt import FunctionWrapper, wrap_function_wrapper
@@ -22,8 +23,7 @@ from opentelemetry.semconv._incubating.attributes import (
 from opentelemetry.trace import set_span_in_context
 from opentelemetry.util.genai.handler import TelemetryHandler
 from opentelemetry.util.genai.invocation import (
-    InferenceInvocation,
-    LocalAgentInvocation,
+    RealtimeInferenceInvocation,
     ToolInvocation,
 )
 from opentelemetry.util.genai.types import Error
@@ -36,40 +36,51 @@ logger = logging.getLogger(__name__)
 
 
 class RealtimeTelemetryHandler:
-    def __init__(self, handler: TelemetryHandler, agent_name: str) -> None:
+    def __init__(
+        self,
+        handler: TelemetryHandler,
+        agent_name: str,
+        *,
+        server_address: str | None = None,
+        server_port: int | None = None,
+    ) -> None:
         self._handler: TelemetryHandler = handler
         self._agent_name: str = agent_name
+        self._server_address: str | None = server_address
+        self._server_port: int | None = server_port
         self._root_context: Context = get_current()
-        self._session: LocalAgentInvocation | None = None
-        self._responses: dict[str, InferenceInvocation] = {}
+        self._session_id: str | None = None
+        self._started: bool = False
+        self._responses: dict[str, RealtimeInferenceInvocation] = {}
         self._tools: dict[str, ToolInvocation] = {}
         self._tool_contexts: dict[str, Context] = {}
         self._model: str | None = None
         self._conversation_id: str | None = None
         self._output_type: str | None = None
         self._closed: bool = False
-        self._error: Error | None = None
 
     def start(self) -> None:
-        if self._session is None and not self._closed:
-            self._session = self._handler.invoke_local_agent( #TODO Convert from a long lived span to an event
-                agent_name=self._agent_name,
+        if not self._started and not self._closed:
+            self._started = True
+            self._handler.emit_realtime_session_started(
+                GenAI.GenAiProviderNameValues.OPENAI.value,
                 request_model=self._model,
-                conversation_id=self._conversation_id,
+                realtime_session_id=self._session_id,
+                server_address=self._server_address,
+                server_port=self._server_port,
                 context=self._root_context,
-                _attach_to_context=False,
             )
 
     @property
     def context(self) -> Context:
-        return self._session.context if self._session else self._root_context
+        return self._root_context
 
     def cleanup(self, error: BaseException | Error | None = None) -> None:
+        if self._closed:
+            return
         self._closed = True
         for response in self._responses.values():
-            response.finish_reasons = [
-                "error" if error is not None else "cancelled"
-            ]
+            response.finish_reasons = ["error"]
         invocations = [*self._tools.values(), *self._responses.values()]
         self._tools.clear()
         self._tool_contexts.clear()
@@ -79,13 +90,16 @@ class RealtimeTelemetryHandler:
                 invocation.stop()
             else:
                 invocation.fail(error)
-        if self._session is not None:
-            session_error = error or self._error
-            if session_error is None:
-                self._session.stop()
-            else:
-                self._session.fail(session_error)
-            self._session = None
+        if self._started:
+            self._handler.emit_realtime_session_ended(
+                GenAI.GenAiProviderNameValues.OPENAI.value,
+                request_model=self._model,
+                realtime_session_id=self._session_id,
+                server_address=self._server_address,
+                server_port=self._server_port,
+                error=error,
+                context=self._root_context,
+            )
 
     def handle_event(self, event: Any) -> Context:
         if self._closed:
@@ -102,14 +116,10 @@ class RealtimeTelemetryHandler:
         event_type = data.get("type")
         if event_type == "session.created":
             session = data["session"]
+            self._session_id = session.get("id")
             self._model = session.get("model")
             self._output_type = _output_type(session)
             self.start()
-            if self._session is not None:
-                if self._model:
-                    self._session.attributes[GenAI.GEN_AI_REQUEST_MODEL] = (
-                        self._model
-                    )
         elif event_type == "session.updated":
             self._model = data["session"].get("model", self._model)
             self._output_type = _output_type(
@@ -117,16 +127,16 @@ class RealtimeTelemetryHandler:
             )
         elif event_type == "conversation.created":
             self._conversation_id = data["conversation"].get("id")
-            if self._session is not None:
-                self._session.conversation_id = self._conversation_id
         elif event_type == "response.created":
             response = data["response"]
             response_id = response.get("id")
             if response_id and response_id not in self._responses:
-                invocation = self._handler.inference(
+                invocation = self._handler.realtime_inference(
                     GenAI.GenAiProviderNameValues.OPENAI.value,
                     request_model=self._model,
-                    operation_name=GenAI.GenAiOperationNameValues.GENERATE_CONTENT.value, #TODO will change with new semconv
+                    realtime_session_id=self._session_id,
+                    server_address=self._server_address,
+                    server_port=self._server_port,
                     conversation_id=response.get(
                         "conversation_id", self._conversation_id
                     ),
@@ -165,10 +175,30 @@ class RealtimeTelemetryHandler:
                 invocation.audio_output_tokens = output_details.get(
                     "audio_tokens"
                 )
+                invocation.text_input_tokens = input_details.get("text_tokens")
+                invocation.text_output_tokens = output_details.get(
+                    "text_tokens"
+                )
+                invocation.cache_read_input_tokens = input_details.get(
+                    "cached_tokens"
+                )
+                cached_details: dict[str, int] = (
+                    input_details.get("cached_tokens_details") or {}
+                )
+                invocation.audio_cache_read_input_tokens = cached_details.get(
+                    "audio_tokens"
+                )
+                invocation.text_cache_read_input_tokens = cached_details.get(
+                    "text_tokens"
+                )
                 details: dict[str, Any] = response.get("status_details") or {}
-                reason = details.get("reason") or response.get("status")
-                if reason:
-                    invocation.finish_reasons = [reason]
+                reason = details.get("reason")
+                if not reason:
+                    reason = {
+                        "completed": "completed",
+                        "cancelled": "interrupted",
+                    }.get(response.get("status"), "error")
+                invocation.finish_reasons = [reason]
                 if response.get("status") == "failed":
                     provider_error: dict[str, Any] = details.get("error") or {}
                     invocation.fail(
@@ -205,11 +235,6 @@ class RealtimeTelemetryHandler:
             if invocation is not None:
                 invocation.record_stream_chunk()
                 return invocation.context
-        elif event_type == "error":
-            error: dict[str, Any] = data.get("error") or {}
-            self._error = Error(
-                type=error.get("type") or "unknown", message=None
-            )
         return self.context
 
     def start_tool(self, event: Any) -> ToolInvocation | None:
@@ -218,6 +243,7 @@ class RealtimeTelemetryHandler:
         tool = self._handler.tool(
             name=event.name,
             tool_type="function",
+            agent_name=self._agent_name,
             context=self._tool_contexts.pop(event.call_id, self.context),
             _attach_to_context=False,
         )
@@ -351,8 +377,17 @@ class RealtimeInstrumentation:
             and isinstance(instance.model, self._model_class)
         ):
             try:
+                connection_url: str = instance._model_config.get(
+                    "url", "wss://api.openai.com/v1/realtime"
+                )
+                url = urlparse(connection_url)
                 self._handlers[instance.model] = RealtimeTelemetryHandler(
-                    self._handler, instance._current_agent.name
+                    self._handler,
+                    instance._current_agent.name,
+                    server_address=url.hostname,
+                    server_port=url.port
+                    if url.port is not None
+                    else (443 if url.scheme == "wss" else 80),
                 )
             except Exception:
                 logger.debug(
@@ -368,13 +403,6 @@ class RealtimeInstrumentation:
         kwargs: Any,
     ) -> Any:
         handler = self._handlers.get(instance.model)
-        if handler is not None and is_instrumentation_enabled():
-            try:
-                handler.start()
-            except Exception:
-                logger.debug(
-                    "Could not start realtime telemetry", exc_info=True
-                )
         try:
             return await wrapped(*args, **kwargs)
         except BaseException as error:

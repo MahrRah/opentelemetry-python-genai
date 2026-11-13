@@ -41,10 +41,19 @@ from __future__ import annotations
 
 from opentelemetry._logs import (
     LoggerProvider,
+    LogRecord,
+    SeverityNumber,
     get_logger,
 )
 from opentelemetry.context import Context, get_value
 from opentelemetry.metrics import Meter, MeterProvider, get_meter
+from opentelemetry.semconv._incubating.attributes import (
+    gen_ai_attributes as GenAI,
+)
+from opentelemetry.semconv.attributes import (
+    error_attributes,
+    server_attributes,
+)
 from opentelemetry.semconv.schemas import Schemas
 from opentelemetry.trace import (
     TracerProvider,
@@ -80,6 +89,7 @@ from opentelemetry.util.genai.invocation import (
     InferenceData,
     InferenceInvocation,
     LocalAgentInvocation,
+    RealtimeInferenceInvocation,
     RemoteAgentInvocation,
     RetrievalData,
     RetrievalInvocation,
@@ -88,10 +98,14 @@ from opentelemetry.util.genai.invocation import (
 )
 from opentelemetry.util.genai.types import (
     ContentCapturingMode,
+    Error,
     ErrorTypeResolver,
 )
 from opentelemetry.util.genai.utils import get_content_capturing_mode
 from opentelemetry.util.genai.version import __version__
+from opentelemetry.util.types import AttributeValue
+
+_GEN_AI_REALTIME_SESSION_ID = "gen_ai.realtime_session.id"
 
 
 class TelemetryHandler:
@@ -278,6 +292,142 @@ class TelemetryHandler:
             context=context,
             _attach_to_context=_attach_to_context,
             conversation_id=conversation_id,
+        )
+
+    def realtime_inference(
+        self,
+        provider: str,
+        *,
+        request_model: str | None = None,
+        realtime_session_id: str | None = None,
+        server_address: str | None = None,
+        server_port: int | None = None,
+        error_type_resolver: ErrorTypeResolver | None = None,
+        context: Context | None = None,
+        _attach_to_context: bool = True,
+        conversation_id: str | None = None,
+    ) -> RealtimeInferenceInvocation:
+        """Start a CLIENT span for one provider-defined realtime generation.
+
+        Set ``gen_ai.realtime_session.id`` when supplied, independently from
+        ``gen_ai.conversation.id``. Provider, model, and server attributes are
+        available at span creation. Call ``stop`` or ``fail`` when the generation
+        ends, not when the connection closes. No inference details event is emitted.
+        See https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/gen-ai-realtime.md.
+        """
+        invocation = RealtimeInferenceInvocation(
+            self._tracer,
+            self._instruments,
+            self._logger,
+            self._completion_hook,
+            provider=provider,
+            request_model=request_model,
+            server_address=server_address,
+            server_port=server_port,
+            operation_name="realtime_inference",
+            error_type_resolver=error_type_resolver,
+            content_capturing_mode=self._content_capturing_mode,
+            context=context,
+            _attach_to_context=_attach_to_context,
+            conversation_id=conversation_id,
+        )
+        if realtime_session_id is not None:
+            invocation.attributes[_GEN_AI_REALTIME_SESSION_ID] = (
+                realtime_session_id
+            )
+        return invocation
+
+    def emit_realtime_session_started(
+        self,
+        provider: str,
+        *,
+        request_model: str | None = None,
+        realtime_session_id: str | None = None,
+        server_address: str | None = None,
+        server_port: int | None = None,
+        context: Context | None = None,
+    ) -> None:
+        """Emit the INFO event for an established realtime connection.
+
+        Record the provider and any supplied model, session ID, and server
+        attributes independently of content capture. Emit once per connection.
+        See https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/gen-ai-realtime.md#event-gen_aiclientrealtime_sessionstarted.
+        """
+        self._emit_realtime_session_event(
+            "gen_ai.client.realtime_session.started",
+            provider,
+            request_model=request_model,
+            realtime_session_id=realtime_session_id,
+            server_address=server_address,
+            server_port=server_port,
+            context=context,
+        )
+
+    def emit_realtime_session_ended(
+        self,
+        provider: str,
+        *,
+        request_model: str | None = None,
+        realtime_session_id: str | None = None,
+        server_address: str | None = None,
+        server_port: int | None = None,
+        error: Error | BaseException | None = None,
+        context: Context | None = None,
+    ) -> None:
+        """Emit the event for a closed realtime connection, once per connection.
+
+        Record supplied model, session ID, and server attributes. Normal closure
+        uses INFO; an error that ended the session sets ``error.type`` and WARN.
+        Do not pass an earlier recoverable error when the session closed normally.
+        See https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/gen-ai-realtime.md#event-gen_aiclientrealtime_sessionended.
+        """
+        self._emit_realtime_session_event(
+            "gen_ai.client.realtime_session.ended",
+            provider,
+            request_model=request_model,
+            realtime_session_id=realtime_session_id,
+            server_address=server_address,
+            server_port=server_port,
+            error=error,
+            context=context,
+        )
+
+    def _emit_realtime_session_event(
+        self,
+        event_name: str,
+        provider: str,
+        *,
+        request_model: str | None,
+        realtime_session_id: str | None,
+        server_address: str | None,
+        server_port: int | None,
+        context: Context | None,
+        error: Error | BaseException | None = None,
+    ) -> None:
+        attributes: dict[str, AttributeValue] = {
+            name: value
+            for name, value in (
+                (GenAI.GEN_AI_PROVIDER_NAME, provider),
+                (GenAI.GEN_AI_REQUEST_MODEL, request_model),
+                (_GEN_AI_REALTIME_SESSION_ID, realtime_session_id),
+                (server_attributes.SERVER_ADDRESS, server_address),
+                (server_attributes.SERVER_PORT, server_port),
+            )
+            if value is not None
+        }
+        if isinstance(error, BaseException):
+            error = Error.from_exception(error)
+        if error is not None:
+            attributes[error_attributes.ERROR_TYPE] = error.type
+        self._logger.emit(
+            LogRecord(
+                event_name=event_name,
+                severity_number=SeverityNumber.WARN
+                if error is not None
+                else SeverityNumber.INFO,
+                attributes=attributes,
+                context=context,
+            )
         )
 
     def embedding(

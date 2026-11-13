@@ -21,7 +21,7 @@ into spans that mirror the structure of your agent run:
 The spans nest to reflect the run, so a single ``Runner.run`` produces a
 workflow span with the agent and tool calls it triggered as children.
 
-LLM-level spans (``chat`` / ``embeddings``) are **not** emitted by this package.
+For regular agent runs, LLM-level spans (``chat`` / ``embeddings``) are **not** emitted by this package.
 They are produced by
 `opentelemetry-instrumentation-genai-openai <https://pypi.org/project/opentelemetry-instrumentation-genai-openai/>`_
 when it is installed and instrumented alongside this package.
@@ -103,6 +103,25 @@ completion hook: set ``OTEL_INSTRUMENTATION_GENAI_COMPLETION_HOOK=upload`` with
 environment variable::
 
     OpenAIAgentsInstrumentor().instrument(completion_hook=my_hook)
+
+Realtime sessions
+-----------------
+
+Install ``openai-agents[realtime]`` and use ``RealtimeAgent`` / ``RealtimeRunner``
+with ``OpenAIAgentsInstrumentor``. Built-in WebSocket sessions emit
+``realtime_inference`` generation spans, tool spans, token usage, and session
+started/ended events correlated by ``gen_ai.realtime_session.id``.
+No OpenAI client instrumentation is required.
+
+Support follows the experimental
+`GenAI realtime semantic conventions <https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/gen-ai-realtime.md>`_.
+Custom transports, ``user_speech`` spans, and realtime content capture (including
+audio and transcripts) are not supported. Tool content follows the configuration
+above.
+
+To disable OpenAI's realtime tracing, set ``tracing_disabled=True`` in
+``RealtimeRunner``'s ``config``; ``disable_openai_trace_export`` only affects
+regular agent runs.
 
 References
 ----------

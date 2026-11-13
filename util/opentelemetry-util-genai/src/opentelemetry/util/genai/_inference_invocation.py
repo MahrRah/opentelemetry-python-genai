@@ -973,6 +973,18 @@ class InferenceInvocation(GenAIInvocation):
         )
 
 
+class RealtimeInferenceInvocation(InferenceInvocation):
+    """A provider-defined generation within a realtime connection.
+
+    Use ``TelemetryHandler.realtime_inference()`` to construct this invocation.
+    Realtime generations do not emit the request/response inference details event.
+    See https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/gen-ai-realtime.md.
+    """
+
+    def _maybe_create_event(self) -> LogRecord | None:
+        return None
+
+
 class SuppressedInferenceInvocation(InferenceInvocation):
     """Represents an inference invocation running inside an active inference context.
 

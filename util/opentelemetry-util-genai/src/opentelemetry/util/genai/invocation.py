@@ -36,6 +36,7 @@ from opentelemetry.util.genai._inference_invocation import (
     CLIENT_INFERENCE_CONTEXT_KEY,
     InferenceData,
     InferenceInvocation,
+    RealtimeInferenceInvocation,
 )
 from opentelemetry.util.genai._invocation import (
     ContextToken,
@@ -70,6 +71,7 @@ __all__ = [
     "InferenceData",
     "InferenceInvocation",
     "LocalAgentInvocation",
+    "RealtimeInferenceInvocation",
     "RemoteAgentInvocation",
     "RetrievalData",
     "RetrievalInvocation",
