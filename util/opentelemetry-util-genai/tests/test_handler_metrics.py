@@ -20,6 +20,33 @@ SCOPE = "opentelemetry.util.genai.handler"
 
 
 class TelemetryHandlerMetricsTest(TestBase):
+    def test_realtime_inference_metrics_omit_session_id(self) -> None:
+        handler = TelemetryHandler(
+            tracer_provider=self.tracer_provider,
+            meter_provider=self.meter_provider,
+        )
+        with handler.realtime_inference(
+            "openai",
+            request_model="gpt-realtime",
+            realtime_session_id="sess_1",
+        ) as invocation:
+            invocation.input_tokens = 10
+            invocation.output_tokens = 5
+            invocation.record_stream_chunk()
+        metrics = self._harvest_metrics()
+        self.assertIn("gen_ai.client.operation.duration", metrics)
+        self.assertIn("gen_ai.client.token.usage", metrics)
+        self.assertIn("gen_ai.client.operation.time_to_first_chunk", metrics)
+        for points in metrics.values():
+            for point in points:
+                self.assertEqual(
+                    point.attributes["gen_ai.operation.name"],
+                    "realtime_inference",
+                )
+                self.assertNotIn(
+                    "gen_ai.realtime_session.id", point.attributes
+                )
+
     def test_inference_stop_records_duration_and_tokens(self) -> None:
         handler = TelemetryHandler(
             tracer_provider=self.tracer_provider,

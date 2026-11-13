@@ -63,6 +63,7 @@ _create_agent_ops := {"create_agent"}
 
 _span_name_keyed_attr["chat"]              := "gen_ai.request.model"
 _span_name_keyed_attr["generate_content"]  := "gen_ai.request.model"
+_span_name_keyed_attr["realtime_inference"] := "gen_ai.request.model"
 _span_name_keyed_attr["text_completion"]   := "gen_ai.request.model"
 _span_name_keyed_attr["embeddings"]        := "gen_ai.request.model"
 _span_name_keyed_attr["execute_tool"]      := "gen_ai.tool.name"
@@ -112,6 +113,8 @@ deny contains _span_finding(
 _expected_for_op("chat", _) := _inference_expected
 
 _expected_for_op("generate_content", _) := _inference_expected
+
+_expected_for_op("realtime_inference", _) := _inference_expected
 
 _expected_for_op("text_completion", _) := _inference_expected
 
@@ -236,6 +239,7 @@ deny contains _span_finding(
 # both kinds are allowed. Undefined (→ no violation) for unmapped ops.
 _expected_kinds_for_op["chat"]             := {"client"}
 _expected_kinds_for_op["generate_content"] := {"client"}
+_expected_kinds_for_op["realtime_inference"] := {"client"}
 _expected_kinds_for_op["text_completion"]  := {"client"}
 _expected_kinds_for_op["embeddings"]       := {"client"}
 _expected_kinds_for_op["execute_tool"]     := {"internal"}
@@ -272,6 +276,7 @@ deny contains _span_finding(
 _known_operation_names := {
 	"chat",
 	"generate_content",
+	"realtime_inference",
 	"text_completion",
 	"embeddings",
 	"fetch_response",

@@ -25,6 +25,7 @@ from opentelemetry.semconv.attributes import (
     error_attributes,
     exception_attributes,
 )
+from opentelemetry.trace import SpanKind
 from opentelemetry.util.genai._inference_invocation import (
     InferenceInvocation,
 )
@@ -74,6 +75,165 @@ class TestTelemetryHandlerEvents(unittest.TestCase):
     def tearDown(self):
         self.span_exporter.clear()
         self.log_exporter.clear()
+
+    @patch.dict(
+        os.environ,
+        {"OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT": "NO_CONTENT"},
+    )
+    def test_realtime_session_events(self) -> None:
+        handler = TelemetryHandler(
+            tracer_provider=self.tracer_provider,
+            logger_provider=self.logger_provider,
+            instrumentation_scope_name="test.realtime",
+            instrumentation_scope_version="1.0",
+        )
+        with self.tracer_provider.get_tracer(__name__).start_as_current_span(
+            "application"
+        ) as parent:
+            for emit in (
+                handler.emit_realtime_session_started,
+                handler.emit_realtime_session_ended,
+            ):
+                emit(
+                    "openai",
+                    request_model="gpt-realtime",
+                    realtime_session_id="sess_1",
+                    server_address="api.openai.com",
+                    server_port=443,
+                )
+        logs = self.log_exporter.get_finished_logs()
+        self.assertEqual(
+            [entry.log_record.event_name for entry in logs],
+            [
+                "gen_ai.client.realtime_session.started",
+                "gen_ai.client.realtime_session.ended",
+            ],
+        )
+        for entry in logs:
+            event = entry.log_record
+            self.assertEqual(entry.instrumentation_scope.name, "test.realtime")
+            self.assertEqual(entry.instrumentation_scope.version, "1.0")
+            self.assertEqual(
+                event.trace_id, parent.get_span_context().trace_id
+            )
+            self.assertEqual(event.span_id, parent.get_span_context().span_id)
+            self.assertEqual(event.severity_number, SeverityNumber.INFO)
+            self.assertIsNone(event.body)
+            self.assertEqual(
+                dict(event.attributes),
+                {
+                    "gen_ai.provider.name": "openai",
+                    "gen_ai.request.model": "gpt-realtime",
+                    "gen_ai.realtime_session.id": "sess_1",
+                    "server.address": "api.openai.com",
+                    "server.port": 443,
+                },
+            )
+            self.assertIs(
+                type(event.attributes["gen_ai.realtime_session.id"]), str
+            )
+            self.assertIs(type(event.attributes["server.port"]), int)
+
+    def test_realtime_session_events_without_optional_fields(self) -> None:
+        self.telemetry_handler.emit_realtime_session_started("openai")
+        self.telemetry_handler.emit_realtime_session_ended("openai")
+        self.assertEqual(len(self.log_exporter.get_finished_logs()), 2)
+        for entry in self.log_exporter.get_finished_logs():
+            self.assertEqual(
+                dict(entry.log_record.attributes),
+                {
+                    "gen_ai.provider.name": "openai",
+                },
+            )
+        self.assertFalse(self.span_exporter.get_finished_spans())
+
+    def test_realtime_session_termination_errors(self) -> None:
+        for error, expected in (
+            (ConnectionError("private detail"), "ConnectionError"),
+            (asyncio.CancelledError(), "asyncio.exceptions.CancelledError"),
+            (
+                Error(type="server_error", message="private detail"),
+                "server_error",
+            ),
+        ):
+            with self.subTest(error=expected):
+                self.log_exporter.clear()
+                self.telemetry_handler.emit_realtime_session_ended(
+                    "openai", error=error
+                )
+                (entry,) = self.log_exporter.get_finished_logs()
+                self.assertEqual(
+                    entry.log_record.severity_number, SeverityNumber.WARN
+                )
+                self.assertEqual(
+                    dict(entry.log_record.attributes),
+                    {
+                        "gen_ai.provider.name": "openai",
+                        "error.type": expected,
+                    },
+                )
+                self.assertIsNone(entry.log_record.body)
+
+    @patch.dict(
+        os.environ,
+        {
+            "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT": "SPAN_AND_EVENT"
+        },
+    )
+    def test_realtime_inference(self) -> None:
+        handler = TelemetryHandler(
+            tracer_provider=self.tracer_provider,
+            logger_provider=self.logger_provider,
+        )
+        with handler.realtime_inference(
+            "openai",
+            request_model="gpt-realtime",
+            realtime_session_id="sess_1",
+            conversation_id="conv_1",
+            server_address="api.openai.com",
+            server_port=443,
+        ) as invocation:
+            self.assertEqual(
+                invocation.span.attributes["gen_ai.operation.name"],
+                "realtime_inference",
+            )
+            self.assertEqual(
+                invocation.span.attributes["gen_ai.provider.name"], "openai"
+            )
+            self.assertEqual(
+                invocation.span.attributes["gen_ai.request.model"],
+                "gpt-realtime",
+            )
+            self.assertEqual(
+                invocation.span.attributes["server.address"], "api.openai.com"
+            )
+            self.assertEqual(invocation.span.attributes["server.port"], 443)
+            invocation.input_messages = [_create_input_message("hello")]
+            invocation.response_id = "resp_1"
+            invocation.finish_reasons = ["completed"]
+        (span,) = self.span_exporter.get_finished_spans()
+        self.assertEqual(span.name, "realtime_inference gpt-realtime")
+        self.assertEqual(span.kind, SpanKind.CLIENT)
+        self.assertEqual(
+            span.attributes["gen_ai.realtime_session.id"], "sess_1"
+        )
+        self.assertIs(type(span.attributes["gen_ai.realtime_session.id"]), str)
+        self.assertEqual(span.attributes["gen_ai.conversation.id"], "conv_1")
+        self.assertEqual(span.attributes["gen_ai.response.id"], "resp_1")
+        self.assertIn("gen_ai.input.messages", span.attributes)
+        self.assertFalse(self.log_exporter.get_finished_logs())
+
+    def test_realtime_inference_failure_without_optional_fields(self) -> None:
+        invocation = self.telemetry_handler.realtime_inference("openai")
+        invocation.fail(Error(type="server_error", message=None))
+        invocation.stop()
+        (span,) = self.span_exporter.get_finished_spans()
+        self.assertEqual(span.name, "realtime_inference")
+        self.assertEqual(span.attributes["error.type"], "server_error")
+        self.assertNotIn("gen_ai.realtime_session.id", span.attributes)
+        self.assertNotIn("gen_ai.conversation.id", span.attributes)
+        self.assertNotIn("gen_ai.request.model", span.attributes)
+        self.assertFalse(self.log_exporter.get_finished_logs())
 
     @patch.dict(
         os.environ,
